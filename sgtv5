@@ -1,3 +1,4 @@
+@ -1,871 +0,0 @@
    
 
 import os
@@ -713,7 +714,7 @@ class HFWrapperDataset(Dataset):
         return val.clone().detach().to(torch.long)
 
 def prepare_data(tokenizer, seq_len=128):
-    print("\n[INFO] Processing dataset via disk-cache to save RAM...")
+    print("\n Processing dataset...")
     dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
     dataset = dataset.filter(lambda x: len(x['text'].strip()) > 50)
     
@@ -810,7 +811,7 @@ def train_auto_scaling(model, dataset, tokenizer, probe_input_ids, n_steps=1000,
             probe_tracker.append(probe_losses.mean())
             print(f"     Step {step:>4}/{n_steps} | Train: {loss.item():.3f} | Probe: {probe_losses.mean():.3f}")
 
-    print(f"\n  [Run Complete] Run Summary:")
+    print(f"\n Run Summary:")
     if sgt.cap_tracker:
         print(f"  Avg Cap:   {np.mean(sgt.cap_tracker):.2f} | Avg Blend: {np.mean(sgt.blend_tracker):.2f} | "
               f"Avg EMA: {np.mean(sgt.ema_tracker):.2f} | Avg Hist: {np.mean(sgt.hist_tracker):.0f} | "
@@ -822,14 +823,14 @@ def train_auto_scaling(model, dataset, tokenizer, probe_input_ids, n_steps=1000,
 
 def main():
     print("=" * 72)
-    print("  SGT v5: MULTI-SIGNAL FEEDBACK CONTROLLER WITH PLATEAU SHOCK")
+    print(" SGT v5")
     print("=" * 72)
 
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     dataset = prepare_data(tokenizer)
 
-    print("\n[INFO] Loading Real Validation Data for Robust Probe...")
+    print("\nFetching Validation Data")
     val_dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
     val_texts = [item['text'] for item in val_dataset if len(item['text'].strip()) > 50]
     val_tokens = tokenizer.encode(" ".join(val_texts))
@@ -862,10 +863,10 @@ def main():
             model.model.embed_tokens.weight.requires_grad = False
 
         if torch.cuda.device_count() > 1:
-            print(f"  -> Using {torch.cuda.device_count()} GPUs via DataParallel!")
+            print(f"  -> Using {torch.cuda.device_count()} GPUs")
             model = torch.nn.DataParallel(model)
 
-        print("  -> Training Self-Calibrating Multi-Signal SGT v5 (Scale-Invariant)...")
+        print("  -> Training with SGT v5")
         train_auto_scaling(model, dataset, tokenizer, probe_tokens, n_steps=5000, lr=6e-4, batch_size=64, warmup_steps=200)
 
 if __name__ == "__main__": main()
