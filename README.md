@@ -1,51 +1,51 @@
-# Self-Calibrating Gradient Tuning (SGT) for Language Models
+Self Calibrating Gradient Tuning (SGT) for Language Models
 
-SGT (Self-Calibrating Gradient Tuning) is a novel, in-situ training controller designed to dynamically auto-scale token weights and architectural gradients during the training of Large Language Models (LLMs). 
+What is SGT?
 
-The primary objective of SGT is to introduce closed-loop control theory into the model optimization process. Rather than relying on fixed learning rate schedules or static dataset mixing proportions, SGT continuously monitors the model's loss landscape and allocates gradient capacity precisely to the concepts the model is struggling to learn, while actively preserving previously acquired knowledge.
+When you train a language model the standard approach is to treat every word equally during training. The model gets the same gradient signal whether it already knows a word perfectly or is completely failing at it. This is wasteful. A model that has already learned common words should not be spending the same compute on them as it does on rare or difficult words it has never seen before.
 
-## Scope of Invention & Authorship
-This repository introduces and claims authorship over the following novel mechanisms for training Neural Networks and Large Language Models:
+SGT fixes this. It is a training controller that sits inside the optimization loop and continuously watches what the model is learning what it is forgetting, and what it is struggling with. Based on this, it reallocates gradient capacity in real time. It boosts the signal for concepts the model is losing and drops the signal for concepts it has already mastered.
 
-1. **Self-Calibrating Gradient Tuning (SGT)**: The overarching closed-loop architecture for in-situ, proxy-free model optimization.
-2. **In-Situ SVD Reference Geometry**: Computing Singular Value Decomposition directly on the immediate loss history and gradient norms inside the primary training loop to determine concept-level learning trajectories, completely eliminating the need for separate proxy models (e.g., DoReMi).
-3. **Four-Quadrant Token Routing**: A dynamic sorting mechanism that continuously evaluates the historical exposure and loss state of every vocabulary token, dynamically reallocating gradient capacity into four states:
-   * **Drop (Solved)**: Halting gradient compute for mastered concepts.
-   * **Retain (Forgetting)**: Aggressively boosting gradients for previously learned concepts that are degrading.
-   * **Damp (Volatile)**: Suppressing gradients for high-variance noise.
-   * **Scrub (Irreducible)**: Ejecting consistently poor tokens despite massive exposure to prevent dataset poisoning.
-4. **Scale-Invariant Signal Extraction**: The use of online Exponential Moving Average (EMA) Z-scoring on the Spatial Coefficient of Variation (CV) and Relative Trend to provide model-agnostic and dataset-agnostic feedback signals.
-5. **Closed-Loop Auto-Annealing & Plateau Shocks**: The autonomous interpolation between scratch training and fine-tuning states (via the `Blend` and `Cap` parameters), accompanied by gradient shock injections triggered autonomously by stagnant relative trends.
+The key difference from existing approaches like DoReMi is that SGT does all of this without needing a separate proxy model. It computes everything it needs directly from the main models own loss history and gradient norms in a single training pass.
 
-## Background and Motivation
-Modern approaches to token weighting and domain mixing generally rely on a two-phase process. A smaller proxy model must first be trained over the dataset to generate reference losses. The primary model is then trained using these static proxy weights. 
+Related Work and Inspirations
 
-This methodology introduces significant computational overhead and relies on the assumption that a small proxy model's learning dynamics accurately reflect those of a much larger target model.
+I want to be clear about what I built versus what already existed. SGT builds on several established ideas in machine learning. The concept of dynamic token-level reweighting using a proxy model was proven by Xie et al. in their 2023 DoReMi paper. The idea of focusing the optimizer on difficult or structured examples comes from Curriculum Learning by Bengio et al. (2009) and Focal Loss by Lin et al. (2017). Finally using Singular Value Decomposition (SVD) to extract dominant components is a classic technique in linear algebra (Eckart-Young). SGT takes these existing concepts and combines them in a novel way to work purely in-situ without proxies.
 
-SGT addresses this limitation by operating entirely online (in-situ). It computes the reference geometry and modulates step sizes directly inside the main model's training loop, relying purely on the model's immediate state. This offers a single-pass, highly efficient alternative to static curriculum learning.
+Scope of Invention and Authorship
 
-## Experimental Results: WikiText-103 (From Scratch)
+This repository introduces the following mechanisms, all of which are original work by me, Feonixid:
 
-The following benchmark demonstrates SGT's capacity to natively scale, allocate resources, and prevent overfitting without manual intervention.
+1. Self-Calibrating Gradient Tuning (SGT): A closed-loop, proxy-free training controller that operates in-situ inside the main training loop to dynamically modulate token weights and gradient scaling.
 
-**Configuration:**
-* **Dataset:** WikiText-103 (Streaming via HuggingFace Arrow mapping)
-* **Architecture:** Pythia-70m (Randomly initialized)
-* **Hardware:** 2 GPUs (DataParallel)
-* **Training Parameters:** 5,000 steps, Batch Size 64
+2. In-Situ SVD Reference Geometry: Instead of training a proxy model to get reference losses, SGT runs Singular Value Decomposition (SVD) directly on the rolling loss history and layer-wise gradient norms. By looking at how the eigenvalues concentrate, it can tell whether the model is making broad progress across many concepts or getting stuck on a few. This determines how aggressively the controller should scale the learning rate at each step.
 
-*Note: Experiments utilizing pre-trained embeddings are currently in progress and will be published in a subsequent update.*
+3. Four-Quadrant Token Routing: Every token in the vocabulary is continuously tracked and classified into one of four states based on its loss trajectory and exposure count.
+Drop (Solved): The model has learned this token well. SGT stops wasting gradient compute on it.
+Retain (Forgetting): The model knew this token before, but its loss is creeping back up. SGT boosts the gradient to prevent forgetting.
+Damp (Volatile): This token's loss is jumping around unpredictably. SGT dampens it so the optimizer does not chase noise.
+Scrub (Irreducible): Despite seeing this token many times, the model cannot learn it. SGT removes it from the loss to prevent it from poisoning the gradients.
 
-### Full 5,000 Step Benchmark Log (DataParallel)
-Below is the complete, raw execution log detailing the step-by-step behavior of the SGT controller on WikiText-103. This log demonstrates the continuous self-calibration of the `Blend`, `Cap`, `Quadrants`, and `Trend` across 5,000 steps, proving that SGT successfully prevented overfitting by dropping over 345 "Solved" tokens and dynamically annealing the controller state.
+4. Scale-Invariant Signal Extraction: SGT does not use hardcoded thresholds. Instead, it tracks the Spatial Coefficient of Variation and the Relative Trend, converting them into Z-scores using their own running statistics. This means SGT automatically adapts to any model size and any dataset without needing to retune anything.
 
-```text
-############################################################
+5. Closed-Loop Auto-Annealing and Plateau Shocks: SGT smoothly transitions between an aggressive training mode and a conservative stabilization mode based on the feedback signals. If the controller detects that the model has been stuck on a plateau for too long, it triggers a temporary shock to push the optimizer out of the local minimum.
+
+Experimental Results: WikiText-103 (From Scratch)
+
+The benchmark below shows SGT training a randomly initialized 70.5M parameter model on WikiText-103 for 5000 steps. No pre-trained weights were used, and the controller adapted entirely on its own.
+
+Reading the log:
+
+Blend rises when the model is learning well and falls when it plateaus. Cap tracks Blend and sets the upper bound for token-level loss weighting. Q:[Drop|Retain|Damp|Scrub] shows how many tokens are in each quadrant at that moment. Trend is the smoothed rate of change of the validation probe loss. PL is the current validation probe loss.
+
+Full 5000 Step Benchmark Log 
+
+
  CONDITION: FROM SCRATCH
-############################################################
 
-  -> Using 2 GPUs via DataParallel!
-  -> Training Self-Calibrating Multi-Signal SGT v5 (Scale-Invariant)...
+
+  
+  ->  SGT v5 ...
        [SGT] Blend: 0.50  | Cap: 5.50 | Q:[Drop=0|Retain=0|Damp=0|Scrub=0] | Trend: +0.0000 | PL: 9.735
        [SGT] Blend: 0.50  | Cap: 5.50 | Q:[Drop=0|Retain=0|Damp=0|Scrub=0] | Trend: +0.0000 | PL: 9.331
        [SGT] Blend: 0.50  | Cap: 7.25 | Q:[Drop=101|Retain=205|Damp=94|Scrub=0] | Trend: -0.4535 | PL: 8.828
@@ -412,8 +412,9 @@ Below is the complete, raw execution log detailing the step-by-step behavior of 
        [SGT] Blend: 0.41  | Cap: 6.92 | Q:[Drop=345|Retain=410|Damp=0|Scrub=0] | Trend: +0.0002 | PL: 3.835
      Step 5000/5000 | Train: 4.060 | Probe: 3.836
 
+   Run Summary:
   Avg Cap:   7.52 | Avg Blend: 0.58 | Avg EMA: 0.62 | Avg Hist: 40 | Avg Freq: 15
   Cap Range: [6.84, 8.10] | Blend Range: [0.38, 0.74]
   Final Train Loss: 4.0600 | Final Probe Loss: 3.8357
   Avg Train Loss:   4.7282 | Avg Probe Loss:   4.2931
-```
+
